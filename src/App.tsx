@@ -58,6 +58,15 @@ function App() {
     [currentGameId],
   )
 
+  async function pushAllLocal(creds: SpaceCreds) {
+    const [players, games, events] = await Promise.all([
+      db.players.toArray(),
+      db.games.toArray(),
+      db.statEvents.toArray(),
+    ])
+    await upsertShared(creds, { players, games, events })
+  }
+
   return (
     <div className="min-h-full text-slate-100">
       <div className="mx-auto max-w-4xl p-4 sm:p-6">
@@ -75,6 +84,8 @@ function App() {
             onCreateSpace={async () => {
               const creds = await createSharedSpace()
               setSpace(creds)
+              // Seed the shared space with this device's current data.
+              await pushAllLocal(creds)
               await pullSharedState(creds)
             }}
             onConnectSpace={async (creds) => {
@@ -89,6 +100,12 @@ function App() {
             onPullLatest={async () => {
               const creds = space
               if (!creds) return
+              await pullSharedState(creds)
+            }}
+            onPushMyDevice={async () => {
+              const creds = space
+              if (!creds) return
+              await pushAllLocal(creds)
               await pullSharedState(creds)
             }}
             onOpenRoster={() => setView({ name: 'roster' })}
@@ -231,6 +248,7 @@ function Home(props: {
   onConnectSpace: (creds: SpaceCreds) => void
   onDisconnectSpace: () => void
   onPullLatest: () => void
+  onPushMyDevice: () => void
   onOpenRoster: () => void
   onNewGame: () => void
   onOpenGame: (gameId: GameId) => void
@@ -307,14 +325,16 @@ function Home(props: {
 
                 <div className="grid grid-cols-2 gap-2">
                   <SecondaryButton onClick={props.onPullLatest}>Pull latest</SecondaryButton>
-                  <button
-                    type="button"
-                    onClick={props.onDisconnectSpace}
-                    className="h-12 w-full rounded-2xl bg-rose-500/15 px-4 text-base font-semibold text-rose-100 ring-1 ring-rose-400/20 active:bg-rose-500/20"
-                  >
-                    Disconnect
-                  </button>
+                  <SecondaryButton onClick={props.onPushMyDevice}>Push my device</SecondaryButton>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={props.onDisconnectSpace}
+                  className="h-12 w-full rounded-2xl bg-rose-500/15 px-4 text-base font-semibold text-rose-100 ring-1 ring-rose-400/20 active:bg-rose-500/20"
+                >
+                  Disconnect
+                </button>
               </>
             ) : (
               <>
