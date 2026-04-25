@@ -211,7 +211,8 @@ app.post('/api/:spaceId/upsert', requireSpaceKey, async (req, res) => {
 // Serve the built SPA
 const distDir = path.join(__dirname, 'dist')
 app.use(express.static(distDir))
-app.get('/*', (_req, res) => {
+// Express 5's router is stricter about wildcards; use a regex fallback.
+app.get(/.*/, (_req, res) => {
   res.sendFile(path.join(distDir, 'index.html'))
 })
 
