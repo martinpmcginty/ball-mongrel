@@ -238,6 +238,14 @@ function Home(props: {
   const [spaceId, setSpaceId] = useState('')
   const [spaceKey, setSpaceKey] = useState('')
 
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // ignore; clipboard not available in some contexts
+    }
+  }
+
   return (
     <div className="grid gap-4">
       <Card>
@@ -258,16 +266,56 @@ function Home(props: {
 
           <div className="grid w-full gap-2 sm:w-[28rem]">
             {props.space ? (
-              <div className="grid grid-cols-2 gap-2">
-                <SecondaryButton onClick={props.onPullLatest}>Pull latest</SecondaryButton>
-                <button
-                  type="button"
-                  onClick={props.onDisconnectSpace}
-                  className="h-12 w-full rounded-2xl bg-rose-500/15 px-4 text-base font-semibold text-rose-100 ring-1 ring-rose-400/20 active:bg-rose-500/20"
-                >
-                  Disconnect
-                </button>
-              </div>
+              <>
+                <div className="rounded-2xl bg-black/20 p-3 ring-1 ring-white/10">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
+                      <div className="text-[10px] font-bold uppercase tracking-widest text-white/40">
+                        Space ID
+                      </div>
+                      <div className="mt-1 break-all text-sm font-extrabold">
+                        {props.space.spaceId}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copy(props.space!.spaceId)}
+                        className="mt-2 h-10 w-full rounded-xl bg-white/10 text-sm font-semibold ring-1 ring-white/10 active:bg-white/15"
+                      >
+                        Copy ID
+                      </button>
+                    </div>
+                    <div className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
+                      <div className="text-[10px] font-bold uppercase tracking-widest text-white/40">
+                        Space key
+                      </div>
+                      <div className="mt-1 break-all text-sm font-extrabold">
+                        {props.space.spaceKey}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copy(props.space!.spaceKey)}
+                        className="mt-2 h-10 w-full rounded-xl bg-white/10 text-sm font-semibold ring-1 ring-white/10 active:bg-white/15"
+                      >
+                        Copy key
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-white/50">
+                    Share both values with the other parent and have them press <span className="font-semibold">Connect</span>.
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <SecondaryButton onClick={props.onPullLatest}>Pull latest</SecondaryButton>
+                  <button
+                    type="button"
+                    onClick={props.onDisconnectSpace}
+                    className="h-12 w-full rounded-2xl bg-rose-500/15 px-4 text-base font-semibold text-rose-100 ring-1 ring-rose-400/20 active:bg-rose-500/20"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </>
             ) : (
               <>
                 <div className="grid gap-2 sm:grid-cols-2">
@@ -385,6 +433,13 @@ function Roster(props: { players: Player[]; space: SpaceCreds | null; onBack: ()
           .map((g) => db.games.update(g.id, { homePlayerIds: g.homePlayerIds.filter((p) => p !== id) })),
       )
     })
+    if (props.space) {
+      // Easiest/robust: after deletions, pull latest on other device. For now, just push updated games.
+      const games = await db.games.toArray()
+      await upsertShared(props.space, {
+        games: games.map((g) => ({ ...g, updatedAt: Date.now() })),
+      })
+    }
   }
 
   return (
@@ -626,10 +681,13 @@ function GameScreen(props: {
     const last = props.events.at(-1)
     if (!last) return
     await db.statEvents.delete(last.id)
+    // Deleting events on server isn't implemented; do a pull on the other device for now.
+    // Future: add delete endpoint or tombstones.
   }
 
   async function clearGameStats() {
     await db.statEvents.where('gameId').equals(props.game.id).delete()
+    // Same note as undo: server doesn't delete existing events yet.
   }
 
   async function addPlayerToGame(playerId: PlayerId) {
