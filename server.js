@@ -10,9 +10,17 @@ const __dirname = path.dirname(__filename)
 const app = express()
 app.use(express.json({ limit: '2mb' }))
 
+function pgSslConfig() {
+  // Render Postgres typically requires SSL; local dev often doesn't.
+  if (process.env.PGSSLMODE === 'disable') return false
+  if (!process.env.DATABASE_URL) return undefined
+  if (process.env.NODE_ENV === 'development') return false
+  return { rejectUnauthorized: false }
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSLMODE === 'disable' ? false : undefined,
+  ssl: pgSslConfig(),
 })
 
 async function ensureSchema() {
