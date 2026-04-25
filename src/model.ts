@@ -9,11 +9,13 @@ export type Player = {
   name: string
   number?: number
   createdAt: number
+  updatedAt?: number
 }
 
 export type Game = {
   id: GameId
   createdAt: number
+  updatedAt?: number
   name: string // e.g. "Round 3 vs Hawks"
   opponent?: string
   startedAt?: number

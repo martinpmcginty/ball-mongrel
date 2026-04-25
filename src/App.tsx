@@ -3,6 +3,15 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { nanoid } from 'nanoid'
 import { db } from './db'
 import {
+  clearSpaceCreds,
+  createSharedSpace,
+  getSpaceCreds,
+  pullSharedState,
+  setSpaceCreds,
+  upsertShared,
+  type SpaceCreds,
+} from './sync'
+import {
   computePoints,
   emptyTotals,
   STAT_TYPES,
@@ -31,6 +40,7 @@ function formatScore(goals: number, behinds: number) {
 
 function App() {
   const [view, setView] = useState<View>({ name: 'home' })
+  const [space, setSpace] = useState<SpaceCreds | null>(() => getSpaceCreds())
 
   const players = useLiveQuery(() => db.players.orderBy('createdAt').toArray(), [])
   const games = useLiveQuery(() => db.games.orderBy('createdAt').reverse().toArray(), [])
@@ -61,6 +71,26 @@ function App() {
           <Home
             games={games ?? []}
             playersCount={(players ?? []).length}
+            space={space}
+            onCreateSpace={async () => {
+              const creds = await createSharedSpace()
+              setSpace(creds)
+              await pullSharedState(creds)
+            }}
+            onConnectSpace={async (creds) => {
+              setSpaceCreds(creds)
+              setSpace(creds)
+              await pullSharedState(creds)
+            }}
+            onDisconnectSpace={() => {
+              clearSpaceCreds()
+              setSpace(null)
+            }}
+            onPullLatest={async () => {
+              const creds = space
+              if (!creds) return
+              await pullSharedState(creds)
+            }}
             onOpenRoster={() => setView({ name: 'roster' })}
             onNewGame={() => setView({ name: 'new-game' })}
             onOpenGame={(gameId) => setView({ name: 'game', gameId, tab: 'live' })}
@@ -70,6 +100,7 @@ function App() {
         {view.name === 'roster' && (
           <Roster
             players={players ?? []}
+            space={space}
             onBack={() => setView({ name: 'home' })}
           />
         )}
@@ -77,6 +108,7 @@ function App() {
         {view.name === 'new-game' && (
           <NewGame
             players={players ?? []}
+            space={space}
             onCancel={() => setView({ name: 'home' })}
             onCreated={(gameId) => setView({ name: 'game', gameId, tab: 'live' })}
           />
@@ -87,6 +119,7 @@ function App() {
             game={currentGame}
             players={players ?? []}
             events={currentEvents ?? []}
+            space={space}
             tab={view.tab}
             onTab={(tab) => setView({ ...view, tab })}
             onBack={() => setView({ name: 'home' })}
@@ -193,12 +226,79 @@ function SecondaryButton(props: {
 function Home(props: {
   games: Game[]
   playersCount: number
+  space: SpaceCreds | null
+  onCreateSpace: () => void
+  onConnectSpace: (creds: SpaceCreds) => void
+  onDisconnectSpace: () => void
+  onPullLatest: () => void
   onOpenRoster: () => void
   onNewGame: () => void
   onOpenGame: (gameId: GameId) => void
 }) {
+  const [spaceId, setSpaceId] = useState('')
+  const [spaceKey, setSpaceKey] = useState('')
+
   return (
     <div className="grid gap-4">
+      <Card>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="text-sm font-semibold text-white/70">Shared database</div>
+            {props.space ? (
+              <div className="text-lg font-extrabold">
+                Connected: <span className="text-white/70">{props.space.spaceId}</span>
+              </div>
+            ) : (
+              <div className="text-lg font-extrabold">Not connected</div>
+            )}
+            <div className="mt-1 text-sm text-white/60">
+              Use a shared space so multiple parents see the same roster, games, and stats.
+            </div>
+          </div>
+
+          <div className="grid w-full gap-2 sm:w-[28rem]">
+            {props.space ? (
+              <div className="grid grid-cols-2 gap-2">
+                <SecondaryButton onClick={props.onPullLatest}>Pull latest</SecondaryButton>
+                <button
+                  type="button"
+                  onClick={props.onDisconnectSpace}
+                  className="h-12 w-full rounded-2xl bg-rose-500/15 px-4 text-base font-semibold text-rose-100 ring-1 ring-rose-400/20 active:bg-rose-500/20"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input
+                    value={spaceId}
+                    onChange={(e) => setSpaceId(e.target.value)}
+                    placeholder="Space ID"
+                    className="h-12 rounded-2xl bg-black/20 px-4 text-base ring-1 ring-white/10 placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-400/60"
+                  />
+                  <input
+                    value={spaceKey}
+                    onChange={(e) => setSpaceKey(e.target.value)}
+                    placeholder="Space key"
+                    className="h-12 rounded-2xl bg-black/20 px-4 text-base ring-1 ring-white/10 placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-cyan-400/60"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <SecondaryButton
+                    onClick={() => props.onConnectSpace({ spaceId: spaceId.trim(), spaceKey: spaceKey.trim() })}
+                    disabled={!spaceId.trim() || !spaceKey.trim()}
+                  >
+                    Connect
+                  </SecondaryButton>
+                  <PrimaryButton onClick={props.onCreateSpace}>Create shared space</PrimaryButton>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </Card>
+
       <Card>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -253,7 +353,7 @@ function Home(props: {
   )
 }
 
-function Roster(props: { players: Player[]; onBack: () => void }) {
+function Roster(props: { players: Player[]; space: SpaceCreds | null; onBack: () => void }) {
   const [name, setName] = useState('')
   const [number, setNumber] = useState<string>('')
 
@@ -261,12 +361,15 @@ function Roster(props: { players: Player[]; onBack: () => void }) {
     const trimmed = name.trim()
     if (!trimmed) return
     const num = number.trim() ? Number(number) : undefined
-    await db.players.add({
+    const player: Player = {
       id: nanoid(),
       name: trimmed,
       number: Number.isFinite(num) ? num : undefined,
       createdAt: Date.now(),
-    })
+      updatedAt: Date.now(),
+    }
+    await db.players.add(player)
+    if (props.space) await upsertShared(props.space, { players: [player] })
     setName('')
     setNumber('')
   }
@@ -364,6 +467,7 @@ function Roster(props: { players: Player[]; onBack: () => void }) {
 
 function NewGame(props: {
   players: Player[]
+  space: SpaceCreds | null
   onCancel: () => void
   onCreated: (gameId: GameId) => void
 }) {
@@ -379,14 +483,17 @@ function NewGame(props: {
   async function createGame() {
     const trimmed = name.trim() || `Game vs ${opponent.trim() || 'Opponent'}`
     const gameId = nanoid()
-    await db.games.add({
+    const game: Game = {
       id: gameId,
       createdAt: Date.now(),
+      updatedAt: Date.now(),
       name: trimmed,
       opponent: opponent.trim() || undefined,
       startedAt: Date.now(),
       homePlayerIds: selectedIds,
-    })
+    }
+    await db.games.add(game)
+    if (props.space) await upsertShared(props.space, { games: [game] })
     props.onCreated(gameId)
   }
 
@@ -480,6 +587,7 @@ function GameScreen(props: {
   game: Game
   players: Player[]
   events: StatEvent[]
+  space: SpaceCreds | null
   tab: 'live' | 'dashboard'
   onTab: (t: 'live' | 'dashboard') => void
   onBack: () => void
@@ -503,13 +611,15 @@ function GameScreen(props: {
   const teamTotals = useMemo(() => totalsFromEvents(props.events), [props.events])
 
   async function addEvent(playerId: PlayerId, type: StatType) {
-    await db.statEvents.add({
+    const ev: StatEvent = {
       id: nanoid(),
       gameId: props.game.id,
       playerId,
       type,
       ts: Date.now(),
-    })
+    }
+    await db.statEvents.add(ev)
+    if (props.space) await upsertShared(props.space, { events: [ev] })
   }
 
   async function undoLast() {
@@ -524,9 +634,13 @@ function GameScreen(props: {
 
   async function addPlayerToGame(playerId: PlayerId) {
     if (props.game.homePlayerIds.includes(playerId)) return
-    await db.games.update(props.game.id, {
+    const updated: Game = {
+      ...props.game,
       homePlayerIds: [...props.game.homePlayerIds, playerId],
-    })
+      updatedAt: Date.now(),
+    }
+    await db.games.put(updated)
+    if (props.space) await upsertShared(props.space, { games: [updated] })
   }
 
   async function createPlayerAndAdd(name: string, number?: number) {
@@ -534,15 +648,21 @@ function GameScreen(props: {
     if (!trimmed) return
     const playerId = nanoid()
     await db.transaction('rw', db.players, db.games, async () => {
-      await db.players.add({
+      const player: Player = {
         id: playerId,
         name: trimmed,
         number,
         createdAt: Date.now(),
-      })
-      await db.games.update(props.game.id, {
+        updatedAt: Date.now(),
+      }
+      await db.players.add(player)
+      const updated: Game = {
+        ...props.game,
         homePlayerIds: [...props.game.homePlayerIds, playerId],
-      })
+        updatedAt: Date.now(),
+      }
+      await db.games.put(updated)
+      if (props.space) await upsertShared(props.space, { players: [player], games: [updated] })
     })
   }
 

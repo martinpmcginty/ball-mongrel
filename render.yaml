@@ -1,8 +1,17 @@
 services:
   - type: web
     name: ball-mongrel
-    runtime: static
+    runtime: node
+    plan: free
     buildCommand: npm ci && npm run build
-    staticPublishPath: dist
-    pullRequestPreviewsEnabled: true
+    startCommand: npm run start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ball-mongrel-db
+          property: connectionString
+
+databases:
+  - name: ball-mongrel-db
+    plan: free
 
