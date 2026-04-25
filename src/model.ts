@@ -21,6 +21,9 @@ export type Game = {
   startedAt?: number
   endedAt?: number
   homePlayerIds: PlayerId[]
+  currentQuarter?: 1 | 2 | 3 | 4
+  quarterTimes?: Partial<Record<1 | 2 | 3 | 4, { startedAt?: number; endedAt?: number }>>
+  quarterLineups?: Partial<Record<1 | 2 | 3 | 4, PlayerId[]>>
 }
 
 export type StatEvent = {
@@ -29,6 +32,7 @@ export type StatEvent = {
   playerId: PlayerId
   type: StatType
   ts: number
+  quarter?: 1 | 2 | 3 | 4
 }
 
 export type PlayerTotals = Record<StatType, number> & {

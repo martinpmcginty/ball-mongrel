@@ -38,6 +38,96 @@ function formatScore(goals: number, behinds: number) {
   return `${goals}.${behinds} (${computePoints(goals, behinds)})`
 }
 
+function csvEscape(value: unknown) {
+  const s = String(value ?? '')
+  if (/[",\n\r]/.test(s)) return `"${s.replaceAll('"', '""')}"`
+  return s
+}
+
+function downloadText(filename: string, content: string, mime = 'text/csv;charset=utf-8') {
+  const blob = new Blob([content], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 2000)
+}
+
+function buildGameCsv(args: {
+  game: Game
+  players: Player[]
+  events: StatEvent[]
+}) {
+  const { game, players, events } = args
+  const byPlayer = new Map(players.map((p) => [p.id, p] as const))
+  const quarters: Array<1 | 2 | 3 | 4> = [1, 2, 3, 4]
+
+  const totalsByPlayerQuarter = new Map<string, ReturnType<typeof emptyTotals>>()
+  function key(pid: string, q: number) {
+    return `${pid}::${q}`
+  }
+
+  for (const e of events) {
+    const q = (e.quarter ?? 1) as 1 | 2 | 3 | 4
+    const k = key(e.playerId, q)
+    const t = totalsByPlayerQuarter.get(k) ?? emptyTotals()
+    t[e.type] += 1
+    t.points = computePoints(t.goal, t.behind)
+    totalsByPlayerQuarter.set(k, t)
+  }
+
+  const header = [
+    'game_id',
+    'game_name',
+    'opponent',
+    'player_id',
+    'player_name',
+    'number',
+    ...quarters.flatMap((q) => [`Q${q}_G`, `Q${q}_B`, `Q${q}_T`, `Q${q}_M`, `Q${q}_Pts`]),
+    'Total_G',
+    'Total_B',
+    'Total_T',
+    'Total_M',
+    'Total_Pts',
+  ]
+
+  const lines: string[] = []
+  lines.push(header.map(csvEscape).join(','))
+
+  for (const pId of game.homePlayerIds) {
+    const p = byPlayer.get(pId)
+    if (!p) continue
+    const perQ = quarters.map((q) => totalsByPlayerQuarter.get(key(p.id, q)) ?? emptyTotals())
+    const total = emptyTotals()
+    for (const t of perQ) {
+      total.goal += t.goal
+      total.behind += t.behind
+      total.tackle += t.tackle
+      total.mark += t.mark
+    }
+    total.points = computePoints(total.goal, total.behind)
+
+    const row = [
+      game.id,
+      game.name,
+      game.opponent ?? '',
+      p.id,
+      p.name,
+      p.number ?? '',
+      ...perQ.flatMap((t) => [t.goal, t.behind, t.tackle, t.mark, t.points]),
+      total.goal,
+      total.behind,
+      total.tackle,
+      total.mark,
+      total.points,
+    ]
+    lines.push(row.map(csvEscape).join(','))
+  }
+
+  return lines.join('\n')
+}
+
 function App() {
   const [view, setView] = useState<View>({ name: 'home' })
   const [space, setSpace] = useState<SpaceCreds | null>(() => getSpaceCreds())
@@ -566,6 +656,8 @@ function NewGame(props: {
       opponent: opponent.trim() || undefined,
       startedAt: Date.now(),
       homePlayerIds: selectedIds,
+      currentQuarter: 1,
+      quarterTimes: { 1: { startedAt: Date.now() } },
     }
     await db.games.add(game)
     if (props.space) await upsertShared(props.space, { games: [game] })
@@ -668,10 +760,19 @@ function GameScreen(props: {
   onBack: () => void
 }) {
   const [showLineup, setShowLineup] = useState(false)
+  const [showOnField, setShowOnField] = useState(false)
+  const quarter = (props.game.currentQuarter ?? 1) as 1 | 2 | 3 | 4
   const homePlayers = useMemo(() => {
     const byId = new Map(props.players.map((p) => [p.id, p] as const))
     return props.game.homePlayerIds.map((id) => byId.get(id)).filter(Boolean) as Player[]
   }, [props.players, props.game.homePlayerIds])
+
+  const onFieldIds = props.game.quarterLineups?.[quarter] ?? null
+  const onFieldPlayers = useMemo(() => {
+    if (!onFieldIds) return null
+    const byId = new Map(homePlayers.map((p) => [p.id, p] as const))
+    return onFieldIds.map((id) => byId.get(id)).filter(Boolean) as Player[]
+  }, [homePlayers, onFieldIds])
 
   const eventsByPlayer = useMemo(() => {
     const map = new Map<PlayerId, StatEvent[]>()
@@ -683,7 +784,15 @@ function GameScreen(props: {
     return map
   }, [props.events])
 
+  const eventsThisQuarter = useMemo(
+    () => props.events.filter((e) => (e.quarter ?? 1) === quarter),
+    [props.events, quarter],
+  )
   const teamTotals = useMemo(() => totalsFromEvents(props.events), [props.events])
+  const teamTotalsQuarter = useMemo(
+    () => totalsFromEvents(eventsThisQuarter),
+    [eventsThisQuarter],
+  )
 
   async function addEvent(playerId: PlayerId, type: StatType) {
     const ev: StatEvent = {
@@ -692,6 +801,7 @@ function GameScreen(props: {
       playerId,
       type,
       ts: Date.now(),
+      quarter,
     }
     await db.statEvents.add(ev)
     if (props.space) await upsertShared(props.space, { events: [ev] })
@@ -744,6 +854,36 @@ function GameScreen(props: {
     })
   }
 
+  async function updateGame(patch: Partial<Game>) {
+    const updated: Game = { ...props.game, ...patch, updatedAt: Date.now() }
+    await db.games.put(updated)
+    if (props.space) await upsertShared(props.space, { games: [updated] })
+  }
+
+  async function startQuarter(q: 1 | 2 | 3 | 4) {
+    const times = { ...(props.game.quarterTimes ?? {}) }
+    times[q] = { ...(times[q] ?? {}), startedAt: Date.now() }
+    await updateGame({ currentQuarter: q, quarterTimes: times })
+  }
+
+  async function endQuarter(q: 1 | 2 | 3 | 4) {
+    const times = { ...(props.game.quarterTimes ?? {}) }
+    times[q] = { ...(times[q] ?? {}), endedAt: Date.now() }
+    await updateGame({ quarterTimes: times })
+  }
+
+  function exportCsv() {
+    const csv = buildGameCsv({ game: props.game, players: homePlayers, events: props.events })
+    const safe = props.game.name.replaceAll(/[^a-z0-9\-_ ]/gi, '').trim().replaceAll(/\s+/g, '-')
+    downloadText(`ball-mongrel_${safe || props.game.id}.csv`, csv)
+  }
+
+  async function setOnFieldForQuarter(q: 1 | 2 | 3 | 4, playerIds: PlayerId[]) {
+    const ql = { ...(props.game.quarterLineups ?? {}) }
+    ql[q] = playerIds
+    await updateGame({ quarterLineups: ql })
+  }
+
   return (
     <div className="grid gap-4">
       <Card>
@@ -758,6 +898,48 @@ function GameScreen(props: {
               <Pill label="B" value={teamTotals.behind} />
               <Pill label="T" value={teamTotals.tackle} />
               <Pill label="M" value={teamTotals.mark} />
+            </div>
+
+            <div className="mt-3 rounded-2xl bg-black/20 p-3 ring-1 ring-white/10">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-sm font-extrabold">Quarter {quarter}</div>
+                <div className="text-xs font-semibold text-white/60">
+                  This qtr: {formatScore(teamTotalsQuarter.goal, teamTotalsQuarter.behind)}
+                </div>
+              </div>
+              <div className="grid grid-cols-4 gap-2">
+                {[1, 2, 3, 4].map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => startQuarter(q as 1 | 2 | 3 | 4)}
+                    className={clsx(
+                      'h-10 rounded-xl text-xs font-extrabold ring-1',
+                      quarter === q
+                        ? 'bg-white/15 ring-white/20'
+                        : 'bg-white/5 ring-white/10 active:bg-white/10',
+                    )}
+                  >
+                    Q{q}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => startQuarter(quarter)}
+                  className="h-11 rounded-xl bg-emerald-500/15 text-sm font-semibold text-emerald-50 ring-1 ring-emerald-400/20 active:bg-emerald-500/20"
+                >
+                  Start Q{quarter}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => endQuarter(quarter)}
+                  className="h-11 rounded-xl bg-amber-500/15 text-sm font-semibold text-amber-50 ring-1 ring-amber-400/20 active:bg-amber-500/20"
+                >
+                  End Q{quarter}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -814,11 +996,32 @@ function GameScreen(props: {
 
             <button
               type="button"
+              onClick={() => setShowOnField((s) => !s)}
+              className={clsx(
+                'h-11 rounded-xl text-sm font-semibold ring-1',
+                showOnField
+                  ? 'bg-white/15 ring-white/20'
+                  : 'bg-white/10 ring-white/10 active:bg-white/15',
+              )}
+            >
+              On field (Q{quarter})
+            </button>
+
+            <button
+              type="button"
               onClick={clearGameStats}
               className="h-11 rounded-xl bg-rose-500/15 text-sm font-semibold text-rose-100 ring-1 ring-rose-400/20 active:bg-rose-500/20 disabled:opacity-40"
               disabled={props.events.length === 0}
             >
               Clear stats
+            </button>
+
+            <button
+              type="button"
+              onClick={exportCsv}
+              className="h-11 rounded-xl bg-cyan-400/15 text-sm font-semibold text-cyan-50 ring-1 ring-cyan-300/20 active:bg-cyan-400/20"
+            >
+              Export CSV
             </button>
           </div>
         </div>
@@ -833,9 +1036,18 @@ function GameScreen(props: {
         />
       )}
 
+      {showOnField && (
+        <OnFieldManager
+          quarter={quarter}
+          teamPlayers={homePlayers}
+          selectedIds={props.game.quarterLineups?.[quarter] ?? []}
+          onChange={(ids) => setOnFieldForQuarter(quarter, ids)}
+        />
+      )}
+
       {props.tab === 'live' ? (
         <LiveEntry
-          players={homePlayers}
+          players={onFieldPlayers ?? homePlayers}
           eventsByPlayer={eventsByPlayer}
           onAdd={addEvent}
         />
@@ -843,6 +1055,86 @@ function GameScreen(props: {
         <Dashboard players={homePlayers} eventsByPlayer={eventsByPlayer} teamTotals={teamTotals} />
       )}
     </div>
+  )
+}
+
+function OnFieldManager(props: {
+  quarter: 1 | 2 | 3 | 4
+  teamPlayers: Player[]
+  selectedIds: PlayerId[]
+  onChange: (ids: PlayerId[]) => void
+}) {
+  const selected = useMemo(() => new Set(props.selectedIds), [props.selectedIds])
+  const selectedCount = selected.size
+
+  function toggle(id: PlayerId) {
+    const next = new Set(selected)
+    if (next.has(id)) next.delete(id)
+    else {
+      if (next.size >= 15) return
+      next.add(id)
+    }
+    props.onChange(Array.from(next))
+  }
+
+  function autoPickFirst15() {
+    props.onChange(props.teamPlayers.slice(0, 15).map((p) => p.id))
+  }
+
+  return (
+    <Card>
+      <div className="mb-2 flex items-end justify-between gap-3">
+        <div>
+          <div className="text-lg font-extrabold">On field — Q{props.quarter}</div>
+          <div className="text-sm text-white/60">
+            Select exactly 15 players to show in the live entry grid.
+          </div>
+        </div>
+        <div className="text-sm font-semibold text-white/60">
+          Selected:{' '}
+          <span className={clsx('font-extrabold', selectedCount === 15 ? 'text-emerald-200' : 'text-white')}>
+            {selectedCount}/15
+          </span>
+        </div>
+      </div>
+
+      <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <SecondaryButton onClick={autoPickFirst15}>Auto pick first 15</SecondaryButton>
+        <SecondaryButton onClick={() => props.onChange([])}>Clear</SecondaryButton>
+        <div className="hidden sm:block" />
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {props.teamPlayers.map((p) => {
+          const isOn = selected.has(p.id)
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => toggle(p.id)}
+              className={clsx(
+                'flex items-center justify-between rounded-2xl px-4 py-3 text-left ring-1',
+                isOn
+                  ? 'bg-emerald-500/15 ring-emerald-400/25'
+                  : 'bg-black/20 ring-white/10 active:bg-black/30',
+              )}
+            >
+              <div className="text-base font-bold">
+                {typeof p.number === 'number' ? (
+                  <span className="mr-2 inline-flex h-7 w-7 items-center justify-center rounded-lg bg-white/10 text-sm font-extrabold ring-1 ring-white/10">
+                    {p.number}
+                  </span>
+                ) : null}
+                {p.name}
+              </div>
+              <div className={clsx('text-xs font-extrabold', isOn ? 'text-emerald-100' : 'text-white/40')}>
+                {isOn ? 'ON' : 'OFF'}
+              </div>
+            </button>
+          )
+        })}
+      </div>
+    </Card>
   )
 }
 
@@ -954,13 +1246,13 @@ function LiveEntry(props: {
         Tip: this view is optimized to show ~15 players at once on iPad. Rotate to landscape for a wider grid.
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
       {props.players.map((p) => {
         const totals = totalsFromEvents(props.eventsByPlayer.get(p.id) ?? [])
         return (
           <div
             key={p.id}
-            className="rounded-2xl bg-white/5 p-3 ring-1 ring-white/10"
+              className="rounded-2xl bg-white/5 p-2 ring-1 ring-white/10"
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -979,7 +1271,7 @@ function LiveEntry(props: {
                   </div>
                 </div>
 
-                <div className="mt-2 grid grid-cols-5 gap-1 text-center text-[11px] font-extrabold text-white/70">
+                  <div className="mt-2 grid grid-cols-5 gap-1 text-center text-[11px] font-extrabold text-white/70 lg:text-[10px]">
                   <div className="rounded-lg bg-black/20 py-1 ring-1 ring-white/10">
                     <div className="text-[9px] text-white/50">G</div>
                     <div>{totals.goal}</div>
@@ -1007,7 +1299,9 @@ function LiveEntry(props: {
                 <div className="text-[10px] font-bold uppercase tracking-widest text-white/40">
                   Score
                 </div>
-                <div className="text-sm font-extrabold">{formatScore(totals.goal, totals.behind)}</div>
+                <div className="text-sm font-extrabold lg:text-[12px]">
+                  {formatScore(totals.goal, totals.behind)}
+                </div>
               </div>
             </div>
 
@@ -1043,7 +1337,7 @@ function CompactStatButton(props: { label: string; onClick: () => void; tone: 's
       type="button"
       onClick={props.onClick}
       className={clsx(
-        'h-11 rounded-2xl text-sm font-extrabold ring-1',
+        'h-11 rounded-2xl text-sm font-extrabold ring-1 lg:h-10 lg:text-[12px]',
         'active:scale-[0.99]',
         styles,
       )}

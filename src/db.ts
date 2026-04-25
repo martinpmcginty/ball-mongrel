@@ -14,6 +14,13 @@ export class BallMongrelDb extends Dexie {
       games: 'id, createdAt, name',
       statEvents: 'id, gameId, playerId, type, ts',
     })
+
+    // Quarter fields added (no index changes needed)
+    this.version(2).stores({
+      players: 'id, createdAt, name',
+      games: 'id, createdAt, name',
+      statEvents: 'id, gameId, playerId, type, ts',
+    })
   }
 }
 

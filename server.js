@@ -49,7 +49,10 @@ async function ensureSchema() {
       opponent text null,
       started_at bigint null,
       ended_at bigint null,
-      home_player_ids jsonb not null
+      home_player_ids jsonb not null,
+      current_quarter integer null,
+      quarter_times jsonb null,
+      quarter_lineups jsonb null
     );
 
     create table if not exists stat_events (
@@ -58,13 +61,20 @@ async function ensureSchema() {
       game_id text not null,
       player_id text not null,
       type text not null,
-      ts bigint not null
+      ts bigint not null,
+      quarter integer null
     );
 
     create index if not exists idx_players_space on players(space_id);
     create index if not exists idx_games_space on games(space_id);
     create index if not exists idx_events_space_game on stat_events(space_id, game_id);
   `)
+
+  // Backfill columns for existing databases.
+  await pool.query(`alter table games add column if not exists current_quarter integer null;`)
+  await pool.query(`alter table games add column if not exists quarter_times jsonb null;`)
+  await pool.query(`alter table games add column if not exists quarter_lineups jsonb null;`)
+  await pool.query(`alter table stat_events add column if not exists quarter integer null;`)
 }
 
 function requireSpaceKey(req, res, next) {
@@ -119,6 +129,9 @@ app.get('/api/:spaceId/state', requireSpaceKey, async (req, res) => {
       startedAt: g.started_at ? Number(g.started_at) : undefined,
       endedAt: g.ended_at ? Number(g.ended_at) : undefined,
       homePlayerIds: g.home_player_ids ?? [],
+      currentQuarter: g.current_quarter ?? undefined,
+      quarterTimes: g.quarter_times ?? undefined,
+      quarterLineups: g.quarter_lineups ?? undefined,
     })),
     events: events.rows.map((e) => ({
       id: e.id,
@@ -126,6 +139,7 @@ app.get('/api/:spaceId/state', requireSpaceKey, async (req, res) => {
       playerId: e.player_id,
       type: e.type,
       ts: Number(e.ts),
+      quarter: e.quarter ?? undefined,
     })),
   })
 })
@@ -165,15 +179,18 @@ app.post('/api/:spaceId/upsert', requireSpaceKey, async (req, res) => {
     for (const g of games) {
       await pool.query(
         `
-        insert into games(id, space_id, created_at, updated_at, name, opponent, started_at, ended_at, home_player_ids)
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        insert into games(id, space_id, created_at, updated_at, name, opponent, started_at, ended_at, home_player_ids, current_quarter, quarter_times, quarter_lineups)
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         on conflict (id) do update set
           updated_at=excluded.updated_at,
           name=excluded.name,
           opponent=excluded.opponent,
           started_at=excluded.started_at,
           ended_at=excluded.ended_at,
-          home_player_ids=excluded.home_player_ids
+          home_player_ids=excluded.home_player_ids,
+          current_quarter=excluded.current_quarter,
+          quarter_times=excluded.quarter_times,
+          quarter_lineups=excluded.quarter_lineups
         `,
         [
           g.id,
@@ -185,6 +202,9 @@ app.post('/api/:spaceId/upsert', requireSpaceKey, async (req, res) => {
           g.startedAt ? Number(g.startedAt) : null,
           g.endedAt ? Number(g.endedAt) : null,
           JSON.stringify(g.homePlayerIds ?? []),
+          typeof g.currentQuarter === 'number' ? g.currentQuarter : null,
+          g.quarterTimes ? JSON.stringify(g.quarterTimes) : null,
+          g.quarterLineups ? JSON.stringify(g.quarterLineups) : null,
         ],
       )
     }
@@ -192,11 +212,19 @@ app.post('/api/:spaceId/upsert', requireSpaceKey, async (req, res) => {
     for (const e of events) {
       await pool.query(
         `
-        insert into stat_events(id, space_id, game_id, player_id, type, ts)
-        values ($1,$2,$3,$4,$5,$6)
+        insert into stat_events(id, space_id, game_id, player_id, type, ts, quarter)
+        values ($1,$2,$3,$4,$5,$6,$7)
         on conflict (id) do nothing
         `,
-        [e.id, spaceId, e.gameId, e.playerId, e.type, Number(e.ts ?? Date.now())],
+        [
+          e.id,
+          spaceId,
+          e.gameId,
+          e.playerId,
+          e.type,
+          Number(e.ts ?? Date.now()),
+          typeof e.quarter === 'number' ? e.quarter : null,
+        ],
       )
     }
 
