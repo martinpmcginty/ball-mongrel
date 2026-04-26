@@ -771,7 +771,8 @@ function GameScreen(props: {
   const onFieldPlayers = useMemo(() => {
     if (!onFieldIds) return null
     const byId = new Map(homePlayers.map((p) => [p.id, p] as const))
-    return onFieldIds.map((id) => byId.get(id)).filter(Boolean) as Player[]
+    const players = onFieldIds.map((id) => byId.get(id)).filter(Boolean) as Player[]
+    return players.sort((a, b) => a.name.localeCompare(b.name))
   }, [homePlayers, onFieldIds])
 
   const eventsByPlayer = useMemo(() => {
